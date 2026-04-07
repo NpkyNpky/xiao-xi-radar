@@ -33,6 +33,7 @@ RSS_FEEDS = [
 ]
 
 CRITICAL_KW = ["nuclear", "hormuz", "strait closed", "war declared", "missile strike", "bombed", "invasion", "airstrikes", "emergency rate", "circuit breaker", "iran attack", "oil embargo"]
+WARLINE_KW = ["trump", "iran", "hormuz", "strait", "ceasefire", "deadline", "strike", "missile", "attack", "airstrike", "bridge", "power plant", "oil", "crude", "sanctions", "israel"]
 HIGH_KW = ["war", "conflict", "sanctions", "oil price", "crude", "opec", "fed rate", "inflation", "recession", "military", "ceasefire", "tariff", "energy crisis", "iran", "israel", "taiwan"]
 MARKET_KW = ["stock market", "dow jones", "nasdaq", "s&p", "earnings", "powell", "fomc", "treasury", "gold", "bond yield", "futures"]
 SIGNAL_WORDS = ["earnings", "beat", "miss", "guidance", "upgrade", "downgrade", "acquisition", "layoff", "record", "surge", "decline", "buyback", "partnership", "contract", "revenue"]
@@ -123,6 +124,9 @@ def classify_intel(title, summary):
     for k in CRITICAL_KW:
         if k in text:
             return "CRITICAL"
+    war_hits = sum(1 for k in WARLINE_KW if k in text)
+    if war_hits >= 2:
+        return "WARLINE"
     if sum(1 for k in HIGH_KW if k in text) >= 2:
         return "HIGH"
     if sum(1 for k in MARKET_KW if k in text) >= 2:
@@ -131,7 +135,7 @@ def classify_intel(title, summary):
 
 
 def analyze_intel(title, summary, level):
-    level_cn = {"CRITICAL": "极紧急", "HIGH": "高度关注", "MARKET": "市场动态"}.get(level, "资讯")
+    level_cn = {"CRITICAL": "极紧急", "WARLINE": "战情线", "HIGH": "高度关注", "MARKET": "市场动态"}.get(level, "资讯")
     prompt = f"""你是全球情报分析师，专注全球事件对美股市场的影响。
 请把任何语言的原文都翻译成自然中文，再给出结论。全部用中文回答。
 
@@ -151,7 +155,9 @@ def analyze_intel(title, summary, level):
 S = 明显改变市场风险偏好、油价、利率预期、仓位方向
 A = 足够影响观察、节奏和风控
 B = 有信息量但暂不改动作
-C = 普通资讯或重复消息"""
+C = 普通资讯或重复消息
+
+如果内容属于 Trump / Iran / Hormuz / ceasefire / strike / oil / deadline 这条战情线，请提高敏感度，不要轻易判成 B/C。"""
     out = groq_call(prompt)
     if out:
         lines = out.split("\n")
@@ -284,11 +290,13 @@ def scan_intel(state):
                     continue
 
                 ana = analyze_intel(title, summary, level)
+                if level == "WARLINE" and ana.get("level") not in {"S", "A"}:
+                    ana["level"] = "A"
                 if ana.get("level") not in {"S", "A"}:
                     seen.add(uid)
                     continue
-                label_map = {"CRITICAL": "🚨 极紧急", "HIGH": "⚠️ 高度关注", "MARKET": "📊 市场动态"}
-                alert = "🚨 **极紧急！立即关注！**" if level == "CRITICAL" else ("⚠️ **高度关注**" if level == "HIGH" else "")
+                label_map = {"CRITICAL": "🚨 极紧急", "WARLINE": "🪖 战情线", "HIGH": "⚠️ 高度关注", "MARKET": "📊 市场动态"}
+                alert = "🚨 **极紧急！立即关注！**" if level == "CRITICAL" else ("🪖 **战情线更新**" if level == "WARLINE" else ("⚠️ **高度关注**" if level == "HIGH" else ""))
                 embed = {
                     "title": f"{label_map.get(level, '📰 资讯')} | {feed['icon']} {feed['name']}",
                     "description": f"**{ana['title_zh']}**\n\n{ana['summary_zh']}",
