@@ -89,24 +89,33 @@ def analyze_stock(ticker, title, desc):
 原摘要：{desc[:260]}
 
 请严格按以下格式输出：
+级别: S / A / B / C
 标题中文: 翻译后的中文标题
 摘要中文: 1句中文摘要
 评级: 🟢偏多 或 🔴偏空 或 🟡中性
 影响: 对公司基本面的影响
-行动: 建议操作"""
+行动: 建议操作
+
+分级标准：
+S = 明显改变仓位/风险暴露/估值框架
+A = 足够影响观察、建仓节奏、卖Put决策
+B = 有信息量但暂不改变动作
+C = 噪音或重复信息"""
     out = groq_call(prompt)
     if out:
         lines = out.split("\n")
+        level = next((l.replace("级别:", "").strip().upper() for l in lines if "级别" in l), "B")
         zh_title = next((l.replace("标题中文:", "").strip() for l in lines if "标题中文" in l), title)
         zh_summary = next((l.replace("摘要中文:", "").strip() for l in lines if "摘要中文" in l), desc[:120] if desc else "暂无摘要")
         rating = next((l.replace("评级:", "").strip() for l in lines if "评级" in l), "🟡中性")
         impact = next((l.replace("影响:", "").strip() for l in lines if "影响" in l), "待观察")
         action = next((l.replace("行动:", "").strip() for l in lines if "行动" in l), "持续监控")
     else:
+        level = "B"
         zh_title, zh_summary = title, (desc[:120] if desc else "暂无摘要")
         rating, impact, action = "🟡中性", "待观察", "持续监控"
     color = 0x00FF00 if "🟢" in rating else (0xFF0000 if "🔴" in rating else 0xFFFF00)
-    return {"title_zh": zh_title, "summary_zh": zh_summary, "rating": rating, "impact": impact, "action": action, "color": color}
+    return {"level": level, "title_zh": zh_title, "summary_zh": zh_summary, "rating": rating, "impact": impact, "action": action, "color": color}
 
 
 def classify_intel(title, summary):
@@ -131,24 +140,33 @@ def analyze_intel(title, summary, level):
 原摘要：{summary[:320]}
 
 请严格按以下格式输出：
+级别: S / A / B / C
 标题中文: 翻译后的中文标题
 摘要中文: 1句中文摘要
 影响: 🟢利多 或 🔴利空 或 🟡中性 + 一句话
 板块: 最受影响的板块或资产
-建议: 具体操作建议"""
+建议: 具体操作建议
+
+分级标准：
+S = 明显改变市场风险偏好、油价、利率预期、仓位方向
+A = 足够影响观察、节奏和风控
+B = 有信息量但暂不改动作
+C = 普通资讯或重复消息"""
     out = groq_call(prompt)
     if out:
         lines = out.split("\n")
+        level = next((l.replace("级别:", "").strip().upper() for l in lines if "级别" in l), "B")
         zh_title = next((l.replace("标题中文:", "").strip() for l in lines if "标题中文" in l), title)
         zh_summary = next((l.replace("摘要中文:", "").strip() for l in lines if "摘要中文" in l), summary[:120] if summary else "暂无摘要")
         impact = next((l.replace("影响:", "").strip() for l in lines if "影响" in l), "🟡中性 待观察")
         sector = next((l.replace("板块:", "").strip() for l in lines if "板块" in l), "待定")
         suggest = next((l.replace("建议:", "").strip() for l in lines if "建议" in l), "持续监控")
     else:
+        level = "B"
         zh_title, zh_summary = title, (summary[:120] if summary else "暂无摘要")
         impact, sector, suggest = "🟡中性 待观察", "待定", "持续监控"
     color = 0xFF3333 if "🔴" in impact else (0x00CC44 if "🟢" in impact else 0xFFAA00)
-    return {"title_zh": zh_title, "summary_zh": zh_summary, "impact": impact, "sector": sector, "suggest": suggest, "color": color}
+    return {"level": level, "title_zh": zh_title, "summary_zh": zh_summary, "impact": impact, "sector": sector, "suggest": suggest, "color": color}
 
 
 def parse_dt(value):
@@ -214,6 +232,9 @@ def scan_stocks(state):
 
         ticker = relevant[0]
         ana = analyze_stock(ticker, title, desc)
+        if ana.get("level") not in {"S", "A"}:
+            seen.add(aid)
+            continue
         desc_short = ana["summary_zh"]
         tier = {"META": 1, "MSFT": 1, "NVDA": 1, "GOOGL": 1}.get(ticker, 2)
         tier_icon = {1: "🥇", 2: "🥈"}.get(tier, "🥉")
@@ -222,6 +243,7 @@ def scan_stocks(state):
             "description": f"**{ana['title_zh']}**\n\n{desc_short}",
             "color": ana["color"],
             "fields": [
+                {"name": "⭐ 事件级别", "value": ana["level"], "inline": True},
                 {"name": "📊 六大师评级", "value": ana["rating"], "inline": True},
                 {"name": "💡 基本面影响", "value": ana["impact"], "inline": True},
                 {"name": "🎯 建议操作", "value": ana["action"], "inline": False},
@@ -262,6 +284,9 @@ def scan_intel(state):
                     continue
 
                 ana = analyze_intel(title, summary, level)
+                if ana.get("level") not in {"S", "A"}:
+                    seen.add(uid)
+                    continue
                 label_map = {"CRITICAL": "🚨 极紧急", "HIGH": "⚠️ 高度关注", "MARKET": "📊 市场动态"}
                 alert = "🚨 **极紧急！立即关注！**" if level == "CRITICAL" else ("⚠️ **高度关注**" if level == "HIGH" else "")
                 embed = {
@@ -269,40 +294,10 @@ def scan_intel(state):
                     "description": f"**{ana['title_zh']}**\n\n{ana['summary_zh']}",
                     "color": ana["color"],
                     "fields": [
+                        {"name": "⭐ 事件级别", "value": ana["level"], "inline": True},
                         {"name": "📈 市场影响", "value": ana["impact"], "inline": False},
                         {"name": "🏭 受影响板块", "value": ana["sector"], "inline": True},
                         {"name": "🎯 操作建议", "value": ana["suggest"], "inline": True},
                         {"name": "🔗 原文", "value": f"[点击查看]({entry.get('link', '#')})", "inline": False},
                     ],
-                    "footer": {"text": f"晓犀全球情报 | {datetime.utcnow().strftime('%Y-%m-%d %H:%M UTC')} | GitHub Actions"},
-                }
-                if push(INTEL_HOOK, content=alert, embeds=[embed]):
-                    sent += 1
-                    seen.add(uid)
-                    time.sleep(1)
-        except Exception as e:
-            print(f"RSS源失败 {feed['name']}: {e}")
-
-    state["intel"] = trim_state(list(seen))
-    return sent
-
-
-def main():
-    missing = [k for k, v in {
-        "POLYGON_KEY": POLYGON_KEY,
-        "GROQ_KEY": GROQ_KEY,
-        "RADAR_HOOK": RADAR_HOOK,
-        "INTEL_HOOK": INTEL_HOOK,
-    }.items() if not v]
-    if missing:
-        raise RuntimeError("缺少环境变量: " + ", ".join(missing))
-
-    state = load_state()
-    stock_sent = scan_stocks(state)
-    intel_sent = scan_intel(state)
-    save_state(state)
-    print(f"完成：股票 {stock_sent} 条，全球情报 {intel_sent} 条")
-
-
-if __name__ == "__main__":
-    main()
+                    "footer": {"text": f"晓犀全球情报 | {datetime.utcnow().strftime('%Y-%m-%d %H:%M UTC')} | GitHub Act
