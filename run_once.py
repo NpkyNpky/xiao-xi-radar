@@ -300,4 +300,35 @@ def scan_intel(state):
                         {"name": "🎯 操作建议", "value": ana["suggest"], "inline": True},
                         {"name": "🔗 原文", "value": f"[点击查看]({entry.get('link', '#')})", "inline": False},
                     ],
-                    "footer": {"text": f"晓犀全球情报 | {datetime.utcnow().strftime('%Y-%m-%d %H:%M UTC')} | GitHub Act
+                    "footer": {"text": f"晓犀全球情报 | {datetime.utcnow().strftime('%Y-%m-%d %H:%M UTC')} | GitHub Actions"},
+                }
+                if push(INTEL_HOOK, content=alert, embeds=[embed]):
+                    sent += 1
+                    seen.add(uid)
+                    time.sleep(1)
+        except Exception as e:
+            print(f"RSS源失败 {feed['name']}: {e}")
+
+    state["intel"] = trim_state(list(seen))
+    return sent
+
+
+def main():
+    missing = [k for k, v in {
+        "POLYGON_KEY": POLYGON_KEY,
+        "GROQ_KEY": GROQ_KEY,
+        "RADAR_HOOK": RADAR_HOOK,
+        "INTEL_HOOK": INTEL_HOOK,
+    }.items() if not v]
+    if missing:
+        raise RuntimeError("缺少环境变量: " + ", ".join(missing))
+
+    state = load_state()
+    stock_sent = scan_stocks(state)
+    intel_sent = scan_intel(state)
+    save_state(state)
+    print(f"完成：股票 {stock_sent} 条，全球情报 {intel_sent} 条")
+
+
+if __name__ == "__main__":
+    main()
