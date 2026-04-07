@@ -82,26 +82,31 @@ def groq_call(prompt, max_tokens=180):
 
 def analyze_stock(ticker, title, desc):
     prompt = f"""你是投资分析助手，代表芒格、巴菲特、Burry、Soros、林奇、Keith Gill六位大师。
-分析以下股票新闻，全部用中文回答。
+请把任何语言的原文都翻译成自然中文，再给出结论。全部用中文回答。
 
 股票：{ticker}（{WATCHLIST.get(ticker, ticker)}）
-标题：{title}
-摘要：{desc[:260]}
+原标题：{title}
+原摘要：{desc[:260]}
 
-请严格按格式输出，每行尽量短：
+请严格按以下格式输出：
+标题中文: 翻译后的中文标题
+摘要中文: 1句中文摘要
 评级: 🟢偏多 或 🔴偏空 或 🟡中性
 影响: 对公司基本面的影响
 行动: 建议操作"""
     out = groq_call(prompt)
     if out:
         lines = out.split("\n")
+        zh_title = next((l.replace("标题中文:", "").strip() for l in lines if "标题中文" in l), title)
+        zh_summary = next((l.replace("摘要中文:", "").strip() for l in lines if "摘要中文" in l), desc[:120] if desc else "暂无摘要")
         rating = next((l.replace("评级:", "").strip() for l in lines if "评级" in l), "🟡中性")
         impact = next((l.replace("影响:", "").strip() for l in lines if "影响" in l), "待观察")
         action = next((l.replace("行动:", "").strip() for l in lines if "行动" in l), "持续监控")
     else:
+        zh_title, zh_summary = title, (desc[:120] if desc else "暂无摘要")
         rating, impact, action = "🟡中性", "待观察", "持续监控"
     color = 0x00FF00 if "🟢" in rating else (0xFF0000 if "🔴" in rating else 0xFFFF00)
-    return {"rating": rating, "impact": impact, "action": action, "color": color}
+    return {"title_zh": zh_title, "summary_zh": zh_summary, "rating": rating, "impact": impact, "action": action, "color": color}
 
 
 def classify_intel(title, summary):
@@ -118,26 +123,32 @@ def classify_intel(title, summary):
 
 def analyze_intel(title, summary, level):
     level_cn = {"CRITICAL": "极紧急", "HIGH": "高度关注", "MARKET": "市场动态"}.get(level, "资讯")
-    prompt = f"""你是全球情报分析师，专注全球事件对美股市场的影响，全部用中文回答。
+    prompt = f"""你是全球情报分析师，专注全球事件对美股市场的影响。
+请把任何语言的原文都翻译成自然中文，再给出结论。全部用中文回答。
 
 新闻级别：{level_cn}
-标题：{title}
-摘要：{summary[:320]}
+原标题：{title}
+原摘要：{summary[:320]}
 
-请严格按格式输出：
+请严格按以下格式输出：
+标题中文: 翻译后的中文标题
+摘要中文: 1句中文摘要
 影响: 🟢利多 或 🔴利空 或 🟡中性 + 一句话
 板块: 最受影响的板块或资产
 建议: 具体操作建议"""
     out = groq_call(prompt)
     if out:
         lines = out.split("\n")
+        zh_title = next((l.replace("标题中文:", "").strip() for l in lines if "标题中文" in l), title)
+        zh_summary = next((l.replace("摘要中文:", "").strip() for l in lines if "摘要中文" in l), summary[:120] if summary else "暂无摘要")
         impact = next((l.replace("影响:", "").strip() for l in lines if "影响" in l), "🟡中性 待观察")
         sector = next((l.replace("板块:", "").strip() for l in lines if "板块" in l), "待定")
         suggest = next((l.replace("建议:", "").strip() for l in lines if "建议" in l), "持续监控")
     else:
+        zh_title, zh_summary = title, (summary[:120] if summary else "暂无摘要")
         impact, sector, suggest = "🟡中性 待观察", "待定", "持续监控"
     color = 0xFF3333 if "🔴" in impact else (0x00CC44 if "🟢" in impact else 0xFFAA00)
-    return {"impact": impact, "sector": sector, "suggest": suggest, "color": color}
+    return {"title_zh": zh_title, "summary_zh": zh_summary, "impact": impact, "sector": sector, "suggest": suggest, "color": color}
 
 
 def parse_dt(value):
@@ -203,12 +214,12 @@ def scan_stocks(state):
 
         ticker = relevant[0]
         ana = analyze_stock(ticker, title, desc)
-        desc_short = (desc[:220] + "...") if len(desc) > 220 else desc
+        desc_short = ana["summary_zh"]
         tier = {"META": 1, "MSFT": 1, "NVDA": 1, "GOOGL": 1}.get(ticker, 2)
         tier_icon = {1: "🥇", 2: "🥈"}.get(tier, "🥉")
         embed = {
             "title": f"{tier_icon} 股票快讯 [{ticker}] {WATCHLIST[ticker]}",
-            "description": f"**{title}**\n\n{desc_short}",
+            "description": f"**{ana['title_zh']}**\n\n{desc_short}",
             "color": ana["color"],
             "fields": [
                 {"name": "📊 六大师评级", "value": ana["rating"], "inline": True},
@@ -255,7 +266,7 @@ def scan_intel(state):
                 alert = "🚨 **极紧急！立即关注！**" if level == "CRITICAL" else ("⚠️ **高度关注**" if level == "HIGH" else "")
                 embed = {
                     "title": f"{label_map.get(level, '📰 资讯')} | {feed['icon']} {feed['name']}",
-                    "description": f"**{title}**\n\n{summary[:300]}",
+                    "description": f"**{ana['title_zh']}**\n\n{ana['summary_zh']}",
                     "color": ana["color"],
                     "fields": [
                         {"name": "📈 市场影响", "value": ana["impact"], "inline": False},
