@@ -14,6 +14,7 @@ GROQ_KEY = os.getenv("GROQ_KEY", "")
 GROQ_MODEL = os.getenv("GROQ_MODEL", "llama-3.3-70b-versatile")
 RADAR_HOOK = os.getenv("RADAR_HOOK", "")
 INTEL_HOOK = os.getenv("INTEL_HOOK", "")
+ASX_HOOK = os.getenv("ASX_HOOK", INTEL_HOOK)  # ASX监控默认复用全球情报频道，可单独配置
 STATE_FILE = os.getenv("STATE_FILE", ".state.json")
 
 WATCHLIST = {
@@ -321,6 +322,142 @@ def scan_intel(state):
     return sent
 
 
+# ==================== ASX ETF 监控 ====================
+
+ASX_ETF_PORTFOLIO = {
+    "VHY": {"name": "Vanguard澳洲高股息ETF", "role": "核心收入引擎", "weight": "30%"},
+    "VAS": {"name": "Vanguard澳洲宽基ETF", "role": "分散底仓", "weight": "15%"},
+    "QPON": {"name": "BetaShares浮动利率债ETF", "role": "定海神针", "weight": "20%"},
+    "VGS": {"name": "Vanguard全球发达市场ETF", "role": "增长引擎", "weight": "15%"},
+    "IFRA": {"name": "全球基础设施ETF", "role": "抗通胀收益", "weight": "10%"},
+    "MVB": {"name": "澳洲银行等权ETF", "role": "高Franking收益", "weight": "5%"},
+    "AAA": {"name": "BetaShares现金管理ETF", "role": "再平衡弹药", "weight": "5%"},
+}
+
+ASX_ALERT_KEYWORDS = [
+    "RBA", "reserve bank", "interest rate", "cash rate",  # RBA利率
+    "dividend", "distribution", "ex-dividend", "ex-date",  # 分红公告
+    "VHY", "VAS", "QPON", "VGS", "IFRA", "MVB", "AAA",  # 直接提到ETF
+    "ASX", "asx 200", "australian market",  # 澳洲大盘
+    "commonwealth bank", "CBA", "westpac", "ANZ", "NAB",  # 四大行
+    "BHP", "rio tinto", "iron ore",  # 矿业
+    "inflation", "CPI", "australia gdp",  # 宏观数据
+    "franking", "dividend imputation",  # 税务
+]
+
+ASX_RSS_FEEDS = [
+    {"name": "ASX公告", "url": "https://www.asx.com.au/asx/1/company/VHY/announcements?count=10&market_sensitive=false", "icon": "🦘"},
+    {"name": "澳洲金融评论", "url": "https://www.afr.com/rss", "icon": "📰"},
+    {"name": "路透社澳洲", "url": "https://feeds.reuters.com/reuters/AUBusinessNews", "icon": "🇦🇺"},
+    {"name": "TheAge财经", "url": "https://www.theage.com.au/rss/business/markets.xml", "icon": "📊"},
+]
+
+
+def scan_asx(state):
+    """扫描ASX ETF组合相关新闻和事件"""
+    if not GROQ_KEY:
+        return 0
+
+    seen = set(state.get("asx", []))
+    sent = 0
+    now = datetime.now(timezone.utc)
+
+    # 检查是否需要发送季度提醒（每90天一次）
+    last_quarterly = state.get("asx_last_quarterly", 0)
+    if (now.timestamp() - last_quarterly) > 90 * 24 * 3600:
+        quarterly_embed = {
+            "title": "📅 ASX ETF组合季度检查提醒",
+            "description": "你的被动收入永动机组合需要季度检查了。",
+            "color": 0x00AAFF,
+            "fields": [
+                {"name": "🔍 需要确认的事项", "value": "✅ 各ETF分红是否正常到账\n✅ NAV趋势是否健康\n✅ QPON收益率是否跟上RBA利率\n✅ VHY四大行成分有无异常", "inline": False},
+                {"name": "💰 组合配置提醒",
+                 "value": "\n".join([f"**{k}** {v['weight']} - {v['role']}" for k, v in ASX_ETF_PORTFOLIO.items()]),
+                 "inline": False},
+                {"name": "📞 年度操作", "value": "联系会计师确认Trust分配方案和税务申报", "inline": False},
+            ],
+            "footer": {"text": "晓犀ASX监控 | 永动机组合 | 下次提醒：90天后"}
+        }
+        if push(ASX_HOOK, "📅 **ASX ETF组合季度检查提醒**", [quarterly_embed]):
+            state["asx_last_quarterly"] = now.timestamp()
+            sent += 1
+
+    # 扫描ASX相关新闻
+    for feed_info in ASX_RSS_FEEDS:
+        try:
+            parsed = feedparser.parse(feed_info["url"])
+            for entry in parsed.entries[:5]:
+                if not is_recent_rss(entry, minutes=180):
+                    continue
+                raw = entry.get("id") or entry.get("link") or entry.get("title", "")
+                uid = hashlib.md5(("asx_" + raw).encode("utf-8", "replace")).hexdigest()
+                if uid in seen:
+                    continue
+
+                title = entry.get("title", "")
+                summary = re.sub(r"<[^>]+>", "", entry.get("summary", ""))
+                text = (title + " " + summary).lower()
+
+                # 检查是否触发关键词
+                hits = [k for k in ASX_ALERT_KEYWORDS if k.lower() in text]
+                if len(hits) < 2:
+                    continue
+
+                # AI分析
+                prompt = f"""你是澳洲ETF被动收入组合顾问。分析以下新闻对这个组合的影响，全部用中文回答。
+
+组合：VHY(30%) + VAS(15%) + QPON(20%) + VGS(15%) + IFRA(10%) + MVB(5%) + AAA(5%)
+核心目标：每年约$47,500现金分红 + 本金温和增长
+
+新闻标题：{title}
+新闻摘要：{summary[:300]}
+
+请按格式输出：
+级别: S/A/B（S=需要立即检查仓位，A=值得关注，B=参考信息）
+标题中文: 翻译
+影响: 对组合的具体影响（一句话）
+建议: 是否需要操作（一句话）"""
+
+                out = groq_call(prompt, max_tokens=200)
+                if not out:
+                    continue
+
+                lines = out.split("\n")
+                level = next((l.replace("级别:", "").strip().upper() for l in lines if "级别" in l), "B")
+                if level not in {"S", "A"}:
+                    seen.add(uid)
+                    continue
+
+                zh_title = next((l.replace("标题中文:", "").strip() for l in lines if "标题中文" in l), title)
+                impact = next((l.replace("影响:", "").strip() for l in lines if "影响" in l), "待分析")
+                suggestion = next((l.replace("建议:", "").strip() for l in lines if "建议" in l), "持续观察")
+
+                level_label = "🚨 需立即检查" if level == "S" else "⚠️ 值得关注"
+                color = 0xFF3333 if level == "S" else 0xFFAA00
+
+                embed = {
+                    "title": f"{level_label} | {feed_info['icon']} {feed_info['name']} | ASX永动机",
+                    "description": f"**{zh_title}**\n\n{summary[:250]}",
+                    "color": color,
+                    "fields": [
+                        {"name": "📊 组合影响", "value": impact, "inline": False},
+                        {"name": "🎯 建议操作", "value": suggestion, "inline": False},
+                        {"name": "🔗 原文", "value": f"[点击查看]({entry.get('link', '#')})", "inline": False},
+                    ],
+                    "footer": {"text": f"晓犀ASX监控 | {datetime.utcnow().strftime('%Y-%m-%d %H:%M UTC')} | 永动机组合"}
+                }
+                alert = "🚨 **ASX永动机组合需要关注！**" if level == "S" else "⚠️ **ASX组合参考信息**"
+                if push(ASX_HOOK, alert, [embed]):
+                    sent += 1
+                    seen.add(uid)
+                    time.sleep(1)
+        except Exception as e:
+            print(f"ASX RSS失败 {feed_info['name']}: {e}")
+
+    state["asx"] = trim_state(list(seen))
+    return sent
+
+
 def main():
     missing = [k for k, v in {
         "POLYGON_KEY": POLYGON_KEY,
@@ -334,8 +471,9 @@ def main():
     state = load_state()
     stock_sent = scan_stocks(state)
     intel_sent = scan_intel(state)
+    asx_sent = scan_asx(state)
     save_state(state)
-    print(f"完成：股票 {stock_sent} 条，全球情报 {intel_sent} 条")
+    print(f"完成：股票 {stock_sent} 条，全球情报 {intel_sent} 条，ASX监控 {asx_sent} 条")
 
 
 if __name__ == "__main__":
