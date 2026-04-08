@@ -346,10 +346,18 @@ ASX_ALERT_KEYWORDS = [
 ]
 
 ASX_RSS_FEEDS = [
-    {"name": "ASX公告", "url": "https://www.asx.com.au/asx/1/company/VHY/announcements?count=10&market_sensitive=false", "icon": "🦘"},
-    {"name": "澳洲金融评论", "url": "https://www.afr.com/rss", "icon": "📰"},
+    # 澳洲财经新闻
     {"name": "路透社澳洲", "url": "https://feeds.reuters.com/reuters/AUBusinessNews", "icon": "🇦🇺"},
     {"name": "TheAge财经", "url": "https://www.theage.com.au/rss/business/markets.xml", "icon": "📊"},
+    # RBA利率决议（官方）
+    {"name": "RBA利率决议", "url": "https://www.rba.gov.au/rss/rss-cb-decisions.xml", "icon": "🏦"},
+    {"name": "RBA新闻稿", "url": "https://www.rba.gov.au/rss/rss-cb-speeches.xml", "icon": "📢"},
+    # ASX上市公司公告（四大行 + BHP）
+    {"name": "CBA公告", "url": "https://www.asx.com.au/asx/1/company/CBA/announcements?count=5", "icon": "🏦"},
+    {"name": "WBC公告", "url": "https://www.asx.com.au/asx/1/company/WBC/announcements?count=5", "icon": "🏦"},
+    {"name": "ANZ公告", "url": "https://www.asx.com.au/asx/1/company/ANZ/announcements?count=5", "icon": "🏦"},
+    {"name": "NAB公告", "url": "https://www.asx.com.au/asx/1/company/NAB/announcements?count=5", "icon": "🏦"},
+    {"name": "BHP公告", "url": "https://www.asx.com.au/asx/1/company/BHP/announcements?count=5", "icon": "⛏️"},
 ]
 
 
@@ -458,6 +466,90 @@ def scan_asx(state):
     return sent
 
 
+# ==================== ABS 澳洲统计局数据 ====================
+
+ABS_DATASETS = [
+    {"id": "CPI",   "name": "CPI通货膨脹",  "url": "https://api.data.abs.gov.au/data/CPI/1.50.10001.10.Q?startPeriod=2025-Q1&detail=Full"},
+    {"id": "UNEMP", "name": "失业率",       "url": "https://api.data.abs.gov.au/data/LF/1.3.1599.30.M?startPeriod=2025-01&detail=Full"},
+]
+
+
+def fetch_abs_latest():
+    results = []
+    for ds in ABS_DATASETS:
+        try:
+            r = requests.get(ds["url"], headers={"Accept": "application/json"}, timeout=15)
+            if r.status_code != 200:
+                continue
+            data = r.json()
+            series = data.get("data", {}).get("dataSets", [{}])[0].get("series", {})
+            if not series:
+                continue
+            first_series = list(series.values())[0]
+            obs = first_series.get("observations", {})
+            if not obs:
+                continue
+            latest_val = obs[sorted(obs.keys())[-1]][0]
+            results.append(f"{ds['name']}: {latest_val}")
+        except Exception as e:
+            print(f"ABS失败 {ds['name']}: {e}")
+    return results
+
+
+def scan_abs(state):
+    if not GROQ_KEY:
+        return 0
+    now = datetime.now(timezone.utc)
+    if (now.timestamp() - state.get("abs_last_check", 0)) < 24 * 3600:
+        return 0
+    state["abs_last_check"] = now.timestamp()
+
+    abs_data = fetch_abs_latest()
+    if not abs_data:
+        return 0
+
+    data_str = "\n".join(abs_data)
+    prompt = f"""你是澳洲ETF被动收入组合顾问。
+最新ABS澳洲官方数据：
+{data_str}
+
+组合：VHY(30%) + VAS(15%) + QPON(20%) + VGS(15%) + IFRA(10%) + MVB(5%) + AAA(5%)
+
+级别: S(需立即检查) / A(值得关注) / B(普通参考)
+影响: 对组合各ETF的具体影响
+建议: 是否需要调整仓位，全部用中文"""
+
+    out = groq_call(prompt, max_tokens=250)
+    if not out:
+        return 0
+
+    lines = out.split("\n")
+    level = next((l.replace("级别:", "").strip().upper() for l in lines if "级别" in l), "B")
+    if level not in {"S", "A"}:
+        return 0
+
+    impact = next((l.replace("影响:", "").strip() for l in lines if "影响" in l), "待分析")
+    suggestion = next((l.replace("建议:", "").strip() for l in lines if "建议" in l), "持续观察")
+    color = 0xFF3333 if level == "S" else 0xFFAA00
+    label = "🚨 需立即检查" if level == "S" else "⚠️ 值得关注"
+
+    embed = {
+        "title": f"{label} | 📊 ABS官方数据更新",
+        "description": f"**最新数据**\n{data_str}",
+        "color": color,
+        "fields": [
+            {"name": "📊 对永动机组合的影响", "value": impact, "inline": False},
+            {"name": "🎯 建议", "value": suggestion, "inline": False},
+            {"name": "🔗 数据来源", "value": "[ABS 澳洲统计局](https://www.abs.gov.au)", "inline": False},
+        ],
+        "footer": {"text": f"晓犀ASX监控 | ABS官方数据 | {datetime.utcnow().strftime('%Y-%m-%d %H:%M UTC')}"}
+    }
+    alert = "🚨 **ABS数据重大变化！**" if level == "S" else "⚠️ **ABS宏观数据更新**"
+    if push(ASX_HOOK, alert, [embed]):
+        return 1
+    return 0
+
+
 def main():
     missing = [k for k, v in {
         "POLYGON_KEY": POLYGON_KEY,
@@ -472,8 +564,9 @@ def main():
     stock_sent = scan_stocks(state)
     intel_sent = scan_intel(state)
     asx_sent = scan_asx(state)
+    abs_sent = scan_abs(state)
     save_state(state)
-    print(f"完成：股票 {stock_sent} 条，全球情报 {intel_sent} 条，ASX监控 {asx_sent} 条")
+    print(f"完成：股票 {stock_sent} 条，全球情报 {intel_sent} 条，ASX监控 {asx_sent} 条，ABS数据 {abs_sent} 条")
 
 
 if __name__ == "__main__":
