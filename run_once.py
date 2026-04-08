@@ -14,7 +14,7 @@ GROQ_KEY = os.getenv("GROQ_KEY", "")
 GROQ_MODEL = os.getenv("GROQ_MODEL", "llama-3.3-70b-versatile")
 RADAR_HOOK = os.getenv("RADAR_HOOK", "")
 INTEL_HOOK = os.getenv("INTEL_HOOK", "")
-ASX_HOOK = os.getenv("ASX_HOOK", INTEL_HOOK)  # ASX监控默认复用全球情报频道，可单独配置
+ASX_HOOK = os.getenv("ASX_HOOK", "https://discord.com/api/webhooks/1491282256696967210/vEMgETPLPi8DnVCHZLn-g_1rtSMFARoHuFK1Rkq6qpgyi-u-t2deQT2GBxQ15gL-BSwh")  # ASX专属频道
 STATE_FILE = os.getenv("STATE_FILE", ".state.json")
 
 WATCHLIST = {
